@@ -1,0 +1,4 @@
+{
+    "command": "CI=true PORT=<port> HOST=<host> npm run dev",
+    "working_directory": "/home/kavia/workspace/code-generation/strategic-growth-platform-221425-221435/saas_backend"
+}

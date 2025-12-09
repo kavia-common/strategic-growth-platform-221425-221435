@@ -11,6 +11,10 @@ const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_
   ? (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS).split(',') 
   : '*';
 
+console.log('--- CORS Configuration Check ---');
+console.log(`Allowed Origins: ${JSON.stringify(allowedOrigins)}`);
+console.log(`Process Port: ${process.env.PORT || 3001}`);
+
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],

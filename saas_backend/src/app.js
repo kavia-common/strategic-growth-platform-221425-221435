@@ -3,12 +3,13 @@ const express = require('express');
 const routes = require('./routes');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('../swagger');
-require('dotenv').config();
 
 // Initialize express app
 const app = express();
 
-const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',') : '*';
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS) 
+  ? (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS).split(',') 
+  : '*';
 
 app.use(cors({
   origin: allowedOrigins,

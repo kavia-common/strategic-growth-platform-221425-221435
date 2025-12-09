@@ -1,6 +1,7 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-const apiKey = process.env.GEMINI_API_KEY;
+// Resolve Gemini API Key: Prefer standard, fallback to NEXT_PUBLIC_
+const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
 const maskKey = (key) => key ? `${key.substring(0, 5)}...${key.substring(key.length - 5)}` : 'MISSING';
 
@@ -14,7 +15,9 @@ class ChatService {
   async generateResponse(history, userMessage) {
     if (!model) {
       console.error('Gemini model not initialized due to missing API Key.');
-      return 'Gemini API Key is not configured. Please set GEMINI_API_KEY.';
+      const error = new Error('Gemini API Key is not configured.');
+      error.statusCode = 503; // Service Unavailable
+      throw error;
     }
 
     try {
@@ -36,15 +39,22 @@ class ChatService {
     } catch (error) {
       console.error('Gemini API Error:', error);
       
-      // Handle specific API key errors
+      // Handle specific API key errors and map to status codes
       if (error.status === 401 || (error.message && error.message.includes('401'))) {
-         return 'Error: Invalid Gemini API Key. Please check your configuration.';
+         const authError = new Error('Invalid Gemini API Key. Please check your configuration.');
+         authError.statusCode = 401; // Unauthorized
+         throw authError;
       }
       if (error.status === 403 || (error.message && error.message.includes('403'))) {
-         return 'Error: Access denied to Gemini API. Check quotas or key permissions.';
+         const accessError = new Error('Access denied to Gemini API. Check quotas or key permissions.');
+         accessError.statusCode = 403; // Forbidden
+         throw accessError;
       }
 
-      return 'I\'m sorry, I encountered an error while processing your request.';
+      // Propagate other errors with 500 default
+      const serverError = new Error('Error processing AI response.');
+      serverError.statusCode = 500;
+      throw serverError;
     }
   }
 }

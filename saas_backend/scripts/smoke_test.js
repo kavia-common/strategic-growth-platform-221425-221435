@@ -1,17 +1,77 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 
-const BASE_URL = 'http://localhost:3001';
-// Use a more standard-looking email
-const TEST_EMAIL = `smoke.test.${Date.now()}@gmail.com`;
-const TEST_PASSWORD = 'Password123!';
+const BASE_URL = process.env.API_BASE_URL || 'http://localhost:3001';
+// Use a fixed email to allow upsert/update logic, preventing user bloat
+const TEST_EMAIL = process.env.SMOKE_TEST_EMAIL || 'smoke.test.automated@kavia.ai';
+const TEST_PASSWORD = process.env.SMOKE_TEST_PASSWORD || 'Password123!';
+
+const maskKey = (key) => {
+  if (!key) return 'MISSING';
+  if (key.length < 10) return '***(too short)';
+  return `${key.substring(0, 5)}...${key.substring(key.length - 5)}`;
+};
+
+async function ensureConfirmedUser(supabaseAdmin, email, password) {
+  console.log(`[Auth] Ensuring user ${email} exists and is confirmed...`);
+  
+  // 1. List users to find if exists
+  // listUsers is paginated. For smoke tests on dev envs, 1000 should cover it.
+  const { data: { users }, error: listError } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+  
+  if (listError) {
+    throw new Error(`Failed to list users: ${listError.message}`);
+  }
+
+  const existingUser = users.find(u => u.email === email);
+
+  if (existingUser) {
+    console.log(`[Auth] User found (ID: ${existingUser.id}). Updating confirmation status...`);
+    // 2. Update existing user
+    const { data, error: updateError } = await supabaseAdmin.auth.admin.updateUserById(existingUser.id, {
+      password: password,
+      email_confirm: true,
+      user_metadata: { smoke_test: true }
+    });
+
+    if (updateError) {
+      throw new Error(`Failed to update user: ${updateError.message}`);
+    }
+    return data.user;
+  } else {
+    console.log('[Auth] User not found. Creating new confirmed user...');
+    // 3. Create new user
+    const { data, error: createError } = await supabaseAdmin.auth.admin.createUser({
+      email: email,
+      password: password,
+      email_confirm: true,
+      user_metadata: { smoke_test: true }
+    });
+
+    if (createError) {
+      throw new Error(`Failed to create user: ${createError.message}`);
+    }
+    return data.user;
+  }
+}
 
 async function runTests() {
   console.log('--- Starting Smoke Tests ---');
 
+  // Node Version Check
+  const nodeVersion = process.version;
+  const majorVersion = parseInt(nodeVersion.replace('v', '').split('.')[0], 10);
+  if (majorVersion < 20) {
+    console.warn(`[Warning] Running on Node ${nodeVersion}. Recommended: Node 20+ for best Supabase compatibility.`);
+  } else {
+    console.log(`[Env] Node version: ${nodeVersion} (OK)`);
+  }
+
   // 1. Health Check
   try {
-    const healthRes = await fetch(`${BASE_URL}/`);
+    const healthUrl = `${BASE_URL}/`;
+    console.log(`[Health] Checking ${healthUrl}...`);
+    const healthRes = await fetch(healthUrl);
     console.log(`[Health] Status: ${healthRes.status}`);
     if (healthRes.status !== 200) {
       throw new Error(`Health check failed: ${await healthRes.text()}`);
@@ -25,73 +85,66 @@ async function runTests() {
   // 2. Auth with Supabase
   let token;
   let userId;
+  
   try {
     const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    // Try to find the Service Role Key for admin tasks (creating confirmed users)
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY; 
-    // Fallback to anon key if we just need to sign in (but we can't create confirmed users with anon)
-    const anonKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || serviceRoleKey;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const anonKey = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
 
-    const targetKey = serviceRoleKey || anonKey;
+    console.log(`[Auth] Supabase URL: ${supabaseUrl ? supabaseUrl : 'MISSING'}`);
+    console.log(`[Auth] Service Role Key: ${maskKey(serviceRoleKey)}`);
+    console.log(`[Auth] Anon Key: ${maskKey(anonKey)}`);
 
-    console.log(`[Auth] Supabase URL: ${supabaseUrl}`);
-
-    if (!supabaseUrl || !targetKey) {
-      console.warn('Skipping Auth tests: Missing Supabase credentials in env');
-      return;
+    if (!supabaseUrl) {
+      console.warn('[Auth] FAIL: Missing SUPABASE_URL');
+      process.exit(1);
     }
 
-    // Use the strongest key available
-    const supabase = createClient(supabaseUrl, targetKey);
-
-    console.log(`[Auth] Attempting to create/get user: ${TEST_EMAIL}...`);
-    
-    // Try admin create first to ensure user is confirmed
-    let userCreated = false;
-    if (supabase.auth.admin) {
-        const { data: adminData, error: adminError } = await supabase.auth.admin.createUser({
-            email: TEST_EMAIL,
-            password: TEST_PASSWORD,
-            email_confirm: true
-        });
-        if (!adminError && adminData.user) {
-            console.log('[Auth] User created via Admin API (confirmed).');
-            userCreated = true;
-        } else {
-            console.log(`[Auth] Admin create skipped/failed: ${adminError?.message}. Falling back to normal signup.`);
+    // Prepare clients
+    // We need serviceRoleKey to force confirm users
+    if (serviceRoleKey) {
+      const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
         }
+      });
+      
+      await ensureConfirmedUser(supabaseAdmin, TEST_EMAIL, TEST_PASSWORD);
+    } else {
+      console.warn('[Auth] WARNING: SUPABASE_SERVICE_ROLE_KEY missing. Cannot ensure user is confirmed. Auth may fail if email confirmation is required.');
     }
 
-    if (!userCreated) {
-        const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-          email: TEST_EMAIL,
-          password: TEST_PASSWORD,
-        });
-        
-        if (signUpError) {
-             console.log(`[Auth] Signup failed/exists: ${signUpError.message}`);
-        } else if (!signUpData.session) {
-             console.warn('[Auth] Signup successful but no session (email confirmation required). Admin key might be needed.');
+    // Now sign in using the public/anon key context (simulating frontend)
+    // If anon key is missing, fallback to service key for connection but this isn't ideal for "simulation"
+    const publicKey = anonKey || serviceRoleKey;
+    if (!publicKey) {
+         throw new Error('No Supabase keys available for sign in.');
+    }
+
+    const supabasePublic = createClient(supabaseUrl, publicKey, {
+        auth: {
+            autoRefreshToken: false, // script is short lived
+            persistSession: false
         }
-    }
+    });
 
-    // Always try to sign in to get a fresh session
-    console.log('[Auth] Attempting signin...');
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-        email: TEST_EMAIL,
-        password: TEST_PASSWORD,
+    console.log('[Auth] Attempting signInWithPassword...');
+    const { data: signInData, error: signInError } = await supabasePublic.auth.signInWithPassword({
+      email: TEST_EMAIL,
+      password: TEST_PASSWORD,
     });
 
     if (signInError) {
-        console.error(`[Auth] Signin failed: ${signInError.message}`);
-        return; // Stop auth tests
+      throw new Error(`Sign in failed: ${signInError.message}`);
     }
-    
-    if (signInData.session) {
-        token = signInData.session.access_token;
-        userId = signInData.user.id;
-        console.log('[Auth] Authenticated. Token received.');
+
+    if (!signInData.session) {
+       throw new Error('Sign in succeeded but no session returned. User might not be confirmed?');
     }
+
+    token = signInData.session.access_token;
+    userId = signInData.user.id;
     console.log('[Auth] Authenticated. Token received.');
 
   } catch (e) {
@@ -100,12 +153,13 @@ async function runTests() {
   }
 
   if (!token) {
-    console.log('[Smoke Tests] Stopping early due to lack of auth token.');
-    return;
+     console.error('[Auth] FAIL: No token obtained.');
+     process.exit(1);
   }
 
   // 3. Backend Session Validation
   try {
+    console.log('[Backend Session] Validating session...');
     const sessionRes = await fetch(`${BASE_URL}/auth/session`, {
       method: 'POST',
       headers: {
@@ -121,13 +175,13 @@ async function runTests() {
     console.log('[Backend Session] OK');
   } catch (e) {
     console.error('[Backend Session] FAIL', e.message);
-    // Proceeding usually, but let's stop if basic auth fails on backend
     process.exit(1);
   }
 
   // 4. Create Conversation
   let conversationId;
   try {
+    console.log('[Create Conversation] Creating test chat...');
     const convRes = await fetch(`${BASE_URL}/conversations`, {
       method: 'POST',
       headers: {
@@ -158,7 +212,7 @@ async function runTests() {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ content: 'Hello, what is 2+2? Answer briefly.' })
+      body: JSON.stringify({ content: 'Hello, check 1-2-3. Answer "OK".' })
     });
     console.log(`[Gemini] Status: ${msgRes.status}`);
     
@@ -187,6 +241,7 @@ async function runTests() {
   }
 
   console.log('--- Smoke Tests Completed Successfully ---');
+  process.exit(0);
 }
 
 runTests();
